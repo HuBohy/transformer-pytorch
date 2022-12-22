@@ -52,7 +52,7 @@ def load_checkpoint(model_path, device, is_eval=True):
 
 
 def create_pad_mask(t, pad):
-    mask = (t == pad).unsqueeze(-2)
+    mask = (t == pad).unsqueeze(-3)
     return mask
 
 

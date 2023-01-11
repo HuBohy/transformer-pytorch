@@ -33,7 +33,7 @@ class FeedForwardNetwork(nn.Module):
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, hidden_size, dropout_rate, head_size=8):
+    def __init__(self, hidden_size, dropout_rate, head_size=12):
         super(MultiHeadAttention, self).__init__()
 
         self.head_size = head_size
@@ -41,17 +41,16 @@ class MultiHeadAttention(nn.Module):
         self.att_size = att_size = hidden_size // head_size
         self.scale = att_size ** -0.5
 
-        self.linear_q = nn.Linear(hidden_size, head_size * att_size, bias=False)
-        self.linear_k = nn.Linear(hidden_size, head_size * att_size, bias=False)
-        self.linear_v = nn.Linear(hidden_size, head_size * att_size, bias=False)
+        self.linear_q = nn.Linear(hidden_size, head_size * att_size)
+        self.linear_k = nn.Linear(hidden_size, head_size * att_size)
+        self.linear_v = nn.Linear(hidden_size, head_size * att_size)
         initialize_weight(self.linear_q)
         initialize_weight(self.linear_k)
         initialize_weight(self.linear_v)
 
         self.att_dropout = nn.Dropout(dropout_rate)
 
-        self.output_layer = nn.Linear(head_size * att_size, hidden_size,
-                                      bias=False)
+        self.output_layer = nn.Linear(head_size * att_size, hidden_size)
         initialize_weight(self.output_layer)
 
     def forward(self, q, k, v, cache=None):
@@ -117,22 +116,22 @@ class Encoder(nn.Module):
 
         encoders = [EncoderLayer(hidden_size, filter_size, dropout_rate)
                     for _ in range(n_layers)]
-        self.layers = nn.ModuleList(encoders)
+        self.layer = nn.ModuleList(encoders)
 
         self.last_norm = nn.LayerNorm(hidden_size, eps=1e-6)
 
     def forward(self, inputs):
         encoder_output = inputs
-        for enc_layer in self.layers:
+        for enc_layer in self.layer:
             encoder_output = enc_layer(encoder_output)
         return self.last_norm(encoder_output)
 
 
 class Transformer(nn.Module):
     def __init__(self,
-                 n_layers=6,
-                 hidden_size=512,
-                 filter_size=2048,
+                 n_layers=12,
+                 hidden_size=768,
+                 filter_size=3072,
                  dropout_rate=0.1,
                 ):
         super(Transformer, self).__init__()
@@ -143,7 +142,14 @@ class Transformer(nn.Module):
         self.emb_scale = hidden_size ** 0.5
 
         self.i_emb_dropout = nn.Dropout(dropout_rate)
-
+        self.embeddings = nn.Conv3d(
+            3,
+            hidden_size,
+            (2, 16, 16),
+            stride=(2, 16, 16),
+            padding='valid',
+            device=self.device
+        )
         self.encoder = Encoder(hidden_size, filter_size,
                                 dropout_rate, n_layers).cuda()
 

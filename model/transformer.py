@@ -98,9 +98,12 @@ class EncoderLayer(nn.Module):
         self.ffn = FeedForwardNetwork(hidden_size, filter_size, dropout_rate)
         self.ffn_dropout = nn.Dropout(dropout_rate)
 
-    def forward(self, x):  # pylint: disable=arguments-differ
+    def forward(self, x, t):  # pylint: disable=arguments-differ
         y = self.self_attention_norm(x)
-        y = self.self_attention(y, y, y)
+        t = self.self_attention_norm(t)
+
+        y = self.self_attention(y, t, t)
+
         y = self.self_attention_dropout(y)
         x = x + y
 
@@ -120,72 +123,91 @@ class Encoder(nn.Module):
 
         self.last_norm = nn.LayerNorm(hidden_size, eps=1e-6)
 
-    def forward(self, inputs):
+    def forward(self, inputs, targets):
         encoder_output = inputs
         for enc_layer in self.layer:
-            encoder_output = enc_layer(encoder_output)
-        return self.last_norm(encoder_output)
+            encoder_output = enc_layer(encoder_output, targets)
+        return (encoder_output)
 
 
-class Transformer(nn.Module):
+class CrossModalTransformer(nn.Module):
     def __init__(self,
                  n_layers=12,
                  hidden_size=768,
                  filter_size=3072,
-                 dropout_rate=0.1,
+                 dropout_rate = 0.1
                 ):
-        super(Transformer, self).__init__()
+        super(CrossModalTransformer, self).__init__()
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         self.hidden_size = hidden_size
-        self.emb_scale = hidden_size ** 0.5
+        # self.emb_scale = hidden_size ** 0.5
 
-        self.i_emb_dropout = nn.Dropout(dropout_rate)
-        self.embeddings = nn.Conv3d(
-            3,
-            hidden_size,
-            (2, 16, 16),
-            stride=(2, 16, 16),
-            padding='valid',
-            device=self.device
-        )
+        self.input_embeddings = Embeddings()
+        self.target_embeddings = Embeddings()
         self.encoder = Encoder(hidden_size, filter_size,
                                 dropout_rate, n_layers).cuda()
 
-        # For positional encoding
-        num_timescales = self.hidden_size // 2
-        max_timescale = 10000.0
-        min_timescale = 1.0
-        log_timescale_increment = (
-            math.log(float(max_timescale) / float(min_timescale)) /
-            max(num_timescales - 1, 1))
-        inv_timescales = min_timescale * torch.exp(
-            torch.arange(num_timescales, dtype=torch.float32) *
-            -log_timescale_increment)
-        self.register_buffer('inv_timescales', inv_timescales)
+        self.layernorm = nn.LayerNorm(hidden_size, 1e-12).cuda()
+        self.pooler = Pooler(hidden_size)
 
-    def forward(self, inputs, targets):
-        enc_output = self.encode(inputs)
+    def forward(self, inputs, targets=None):
+        encoded_input = inputs
+        encoded_input += self.input_embeddings.position_embedddings[:, :encoded_input.shape[1]]
+        encoded_input = self.input_embeddings.dropout(encoded_input)
+
+        encoded_target = targets
+        encoded_targets += self.target_embeddings.position_embedddings[:, :encoded_target.shape[1]]
+        encoded_targets = self.target_embeddings.dropout(encoded_target)
+
+        enc_output = self.encoder(encoded_input, encoded_target)[0]
 
         return enc_output
 
-    def encode(self, inputs):
-        # Input embedding
-        input_embedded = inputs
-        input_embedded *= self.emb_scale
-        input_embedded += self.get_position_encoding(inputs)
-        input_embedded = self.i_emb_dropout(input_embedded.to(self.device))
+    # def get_position_encoding(self, x):
+    #     max_length = x.size()[1]
+    #     position = torch.arange(max_length, dtype=torch.float32,
+    #                             device=x.device)
+    #     scaled_time = position.unsqueeze(1) * self.inv_timescales.unsqueeze(0).to(x.device)
+    #     signal = torch.cat([torch.sin(scaled_time), torch.cos(scaled_time)],
+    #                        dim=1)
+    #     signal = F.pad(signal, (0, 0, 0, self.hidden_size % 2))
+    #     signal = signal.view(1, max_length, self.hidden_size)
+    #     return signal
 
-        return self.encoder(input_embedded)
+class Pooler(nn.Module):
+    def __init__(self, hidden_size=768) -> None:
+        super().__init__()
+        self.dense = nn.Linear(hidden_size, hidden_size)
+        self.activation = nn.Tanh()
 
-    def get_position_encoding(self, x):
-        max_length = x.size()[1]
-        position = torch.arange(max_length, dtype=torch.float32,
-                                device=x.device)
-        scaled_time = position.unsqueeze(1) * self.inv_timescales.unsqueeze(0).to(x.device)
-        signal = torch.cat([torch.sin(scaled_time), torch.cos(scaled_time)],
-                           dim=1)
-        signal = F.pad(signal, (0, 0, 0, self.hidden_size % 2))
-        signal = signal.view(1, max_length, self.hidden_size)
-        return signal
+    def forward(self, inputs, idx = 0):
+        first_token_tensor = inputs[:, idx]
+        pooled_output = self.dense(first_token_tensor)
+        pooled_output =self.activation(pooled_output)
+        return pooled_output
+
+class Embeddings(nn.Conv3d):
+    def __init__(
+            self,
+            hidden_size = 768,
+            kernel_size = (4, 16, 16),
+            dropout_rate=0.1
+        ) -> None:
+        super().__init__(
+            3,
+            hidden_size,
+            kernel_size,
+            stride=kernel_size,
+            padding='valid',
+            device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        )
+        
+        self.position_embedddings = nn.Parameter(torch.zeros((1, 3137, hidden_size)))
+        self.cls_token = nn.Parameter(torch.zeros((1, 1, hidden_size)))
+        self.dropout = nn.Dropout(dropout_rate)
+
+class BottleneckTransformer(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()

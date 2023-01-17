@@ -129,6 +129,53 @@ class Encoder(nn.Module):
             encoder_output = enc_layer(encoder_output, targets)
         return (encoder_output)
 
+class Bottleneck(nn.Module):
+    def __init__(self, hidden_size, filter_size, dropout_rate, n_layers, fusion_layer=0) -> None:
+        super().__init__()
+
+        encoders = [EncoderLayer(hidden_size, filter_size, dropout_rate)
+                    for _ in range(fusion_layer)]
+        
+        bottlenecks = [EncoderLayer(hidden_size, filter_size, dropout_rate)
+                    for _ in range(n_layers-fusion_layer)]
+
+        self.video_layer = nn.ModuleList(encoders)
+        self.audio_layer = nn.ModuleList(encoders)
+
+        self.video_bottleneck_layer = nn.ModuleList(bottlenecks)
+        self.audio_bottleneck_layer = nn.ModuleList(bottlenecks)
+
+        self.video_last_norm = nn.LayerNorm(hidden_size, eps=1e-6)
+        self.audio_last_norm = nn.LayerNorm(hidden_size, eps=1e-6)
+
+
+    def forward(self, inputs, targets=None, modality_thetas=[0, 0]):
+        encoder_output = inputs
+        
+        video_output = inputs[:, :modality_thetas[0]]
+        audio_output = inputs[:, modality_thetas[1]:]
+        bottleneck_output = inputs[:, modality_thetas[0]:modality_thetas[1]]
+
+        for vid_layer, aud_layer in zip(self.video_layer, self.audio_layer):
+            video_output = vid_layer(video_output, video_output)
+            audio_output = aud_layer(audio_output, audio_output)
+
+        for vid_layer, aud_layer in zip(self.video_bottleneck_layer, self.audio_bottleneck_layer):
+            video_output = torch.cat((video_output, bottleneck_output), dim=1)
+            audio_output = torch.cat((bottleneck_output, audio_output), dim=1)
+
+            video_output = vid_layer(video_output, video_output)
+            audio_output = aud_layer(audio_output, audio_output)
+            
+            bottleneck_output = (video_output[:, modality_thetas[0]:] + audio_output[:, :modality_thetas[1]-modality_thetas[0]])/2
+
+            video_output = video_output[:, :modality_thetas[0]]
+            audio_output = audio_output[:, modality_thetas[1]-modality_thetas[0]:]
+            
+        encoder_output = torch.cat((video_output, bottleneck_output, audio_output), dim=1)
+
+        return (encoder_output)
+
 
 class CrossModalTransformer(nn.Module):
     def __init__(self,

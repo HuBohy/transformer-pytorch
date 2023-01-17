@@ -176,15 +176,53 @@ class Bottleneck(nn.Module):
 
         return (encoder_output)
 
+class CrossEncoder(nn.Module):
+    def __init__(self, hidden_size, filter_size, dropout_rate, n_layers, fusion_layer=0):
+        super(CrossEncoder, self).__init__()
 
-class CrossModalTransformer(nn.Module):
+        encoders = [EncoderLayer(hidden_size, filter_size, dropout_rate)
+                    for _ in range(fusion_layer)]
+        
+        bottlenecks = [EncoderLayer(hidden_size, filter_size, dropout_rate)
+                    for _ in range(n_layers-fusion_layer)]
+
+        self.video_layer = nn.ModuleList(encoders)
+        self.audio_layer = nn.ModuleList(encoders)
+
+        self.video_bottleneck_layer = nn.ModuleList(bottlenecks)
+        self.audio_bottleneck_layer = nn.ModuleList(bottlenecks)
+        
+        self.video_last_norm = nn.LayerNorm(hidden_size, eps=1e-6)
+        self.audio_last_norm = nn.LayerNorm(hidden_size, eps=1e-6)
+
+    def forward(self, inputs, targets=None, modality_thetas=[0, 0]):
+        assert modality_thetas[0] == modality_thetas[1], "Concatenated multimodal tokens must be continuous"
+        
+        video_output = inputs[:, :modality_thetas[0]]
+        audio_output = inputs[:, modality_thetas[1]:]
+
+        for vid_layer, aud_layer in zip(self.video_layer, self.audio_layer):
+            video_output = vid_layer(video_output, video_output)
+            audio_output = aud_layer(audio_output, audio_output)
+
+        for vid_layer, aud_layer in zip(self.video_bottleneck_layer, self.audio_bottleneck_layer):
+            tmp_video_output = video_output
+            video_output = vid_layer(video_output, audio_output)
+            audio_output = aud_layer(audio_output, tmp_video_output)
+            del tmp_video_output
+            
+        encoder_output = torch.cat((video_output, audio_output), dim=1)
+
+        return (encoder_output)
+
+class Transformer(nn.Module):
     def __init__(self,
                  n_layers=12,
                  hidden_size=768,
                  filter_size=3072,
                  dropout_rate = 0.1
                 ):
-        super(CrossModalTransformer, self).__init__()
+        super(Transformer, self).__init__()
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -203,6 +241,9 @@ class CrossModalTransformer(nn.Module):
         encoded_input = inputs
         encoded_input += self.input_embeddings.position_embedddings[:, :encoded_input.shape[1]]
         encoded_input = self.input_embeddings.dropout(encoded_input)
+
+        if targets == None:
+            targets = inputs
 
         encoded_target = targets
         encoded_targets += self.target_embeddings.position_embedddings[:, :encoded_target.shape[1]]
